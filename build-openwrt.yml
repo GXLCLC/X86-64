@@ -1,0 +1,144 @@
+name: Build OpenWrt (x86/64)
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions (true/false)'
+        required: false
+        default: 'false'
+      version:
+        description: 'OpenWrt version tag (e.g. 2024.x) or leave empty for latest'
+        required: false
+        default: ''
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: config/x86-64.config
+  CUSTOM_CONFIG: config/custom.config
+  DIY_SH: scripts/02-custom-feed.sh
+  CUSTOM_SH: scripts/03-custom-config.sh
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        chmod +x scripts/*.sh
+        ./scripts/01-init-env.sh
+
+    - name: Clone OpenWrt (lede) source
+      id: clone
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          cd openwrt
+          git fetch --depth 1 origin tag ${{ github.event.inputs.version }}
+          git checkout ${{ github.event.inputs.version }}
+        fi
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && cp -rf files openwrt/files
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        chmod +x $CUSTOM_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$CUSTOM_SH
+        # Merge custom.config (append extra packages)
+        if [ -e $GITHUB_WORKSPACE/$CUSTOM_CONFIG ]; then
+          cat $GITHUB_WORKSPACE/$CUSTOM_CONFIG >> .config
+        fi
+
+    - name: SSH connection to Actions
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      env:
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    - name: Download packages
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Generate release info
+      run: |
+        chmod +x scripts/04-gen-release-info.sh
+        ./scripts/04-gen-release-info.sh
+      env:
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+
+    - name: Organize files
+      id: organize
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt-x86-64
+        path: ${{ env.FIRMWARE }}
+
+    - name: Upload release info to artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-info
+        path: release-info/
+
+    - name: Generate release tag
+      id: tag
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v2
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release-info/release-body.md
+        files: |
+          ${{ env.FIRMWARE }}/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

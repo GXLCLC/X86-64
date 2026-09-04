@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
 
 env:
+  # 源码仓库与分支
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
+  # 编译目标与配置路径
   TARGET: x86_64
   CONFIG_FILE: config/x86_64.config
   FILES_DIR: files
   SCRIPTS_DIR: scripts
+  # 固件默认信息（会显示在Release说明中，修改这里同步更新）
+  DEFAULT_LAN_IP: 192.168.1.1
+  DEFAULT_ROOT_PASSWORD: 空（首次登录无需密码）
 
 jobs:
   build:
@@ -33,7 +38,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 执行自定义脚本（添加第三方源）
+      - name: 执行自定义脚本
         run: |
           chmod +x $SCRIPTS_DIR/*.sh
           cd openwrt
@@ -42,7 +47,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 导入自定义配置
+      - name: 导入编译配置
         run: |
           cp $CONFIG_FILE openwrt/.config
           cd openwrt
@@ -54,28 +59,47 @@ jobs:
           make download -j$(nproc)
 
       - name: 编译固件
+        id: compile
         run: |
           cd openwrt
           make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
 
-       - name: 整理固件产物
-        id: prepare
+      - name: 整理固件产物
+        if: steps.compile.outputs.status == 'success'
         run: |
           mkdir -p output
           cp openwrt/bin/targets/x86/64/* output/ || true
-          echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 上传 Actions 产物
+      - name: 生成 Release 说明文档
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "## 📦 固件基本信息" > release.md
+          echo "- **架构**: x86_64 通用" >> release.md
+          echo "- **源码**: Lean's Lede" >> release.md
+          echo "- **LAN 管理地址**: \`${{ env.DEFAULT_LAN_IP }}\`" >> release.md
+          echo "- **默认 root 密码**: ${{ env.DEFAULT_ROOT_PASSWORD }}" >> release.md
+          echo "" >> release.md
+          echo "## 🧩 已启用插件列表" >> release.md
+          grep "^CONFIG_PACKAGE_.*=y" openwrt/.config \
+            | sed 's/CONFIG_PACKAGE_//' \
+            | sed 's/=y//' \
+            | sort \
+            >> release.md
+
+      - name: 上传 Actions 临时产物
+        if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt-x86_64
           path: output/
 
-      - name: 发布到 GitHub Release
-        if: steps.prepare.outputs.status == 'success'
+      - name: 发布到 GitHub Releases
+        if: steps.compile.outputs.status == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: OpenWrt x86_64 编译产物 ${{ github.run_number }}
+          name: OpenWrt x86_64 第 ${{ github.run_number }} 次编译
+          body_path: release.md
           files: output/*
-          generate_release_notes: true
+          generate_release_notes: false

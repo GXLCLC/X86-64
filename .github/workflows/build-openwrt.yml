@@ -1,0 +1,77 @@
+name: 编译 OpenWrt x86_64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'config/**'
+      - 'scripts/**'
+      - 'files/**'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  TARGET: x86_64
+  CONFIG_FILE: config/x86_64.config
+  FILES_DIR: files
+  SCRIPTS_DIR: scripts
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出当前仓库
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 python3-pip unzip zlib1g-dev lib32gcc1 libc6-dev-i386 subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync
+
+      - name: 克隆 Lede 源码
+        run: |
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+
+      - name: 更新官方 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 执行自定义脚本（添加第三方源）
+        run: |
+          chmod +x $SCRIPTS_DIR/*.sh
+          cd openwrt
+          ../$SCRIPTS_DIR/01-add-feeds.sh
+          ../$SCRIPTS_DIR/02-customize.sh
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 导入自定义配置
+        run: |
+          cp $CONFIG_FILE openwrt/.config
+          cd openwrt
+          make defconfig
+
+      - name: 下载源码包
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 整理固件产物
+        run: |
+          mkdir -p output
+          cp openwrt/bin/targets/x86/64/* output/ || true
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt-x86_64
+          path: output/

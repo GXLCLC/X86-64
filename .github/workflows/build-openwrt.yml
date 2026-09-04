@@ -2,13 +2,6 @@ name: 编译 OpenWrt x86_64
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - 'config/**'
-      - 'scripts/**'
-      - 'files/**'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede

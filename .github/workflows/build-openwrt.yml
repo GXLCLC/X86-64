@@ -58,13 +58,24 @@ jobs:
           cd openwrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理固件产物
+       - name: 整理固件产物
+        id: prepare
         run: |
           mkdir -p output
           cp openwrt/bin/targets/x86/64/* output/ || true
+          echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 上传编译产物
+      - name: 上传 Actions 产物
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt-x86_64
           path: output/
+
+      - name: 发布到 GitHub Release
+        if: steps.prepare.outputs.status == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: OpenWrt x86_64 编译产物 ${{ github.run_number }}
+          files: output/*
+          generate_release_notes: true

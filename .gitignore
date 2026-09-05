@@ -1,0 +1,52 @@
+# ==========================================================================
+#  Git 忽略规则（.gitignore）
+# --------------------------------------------------------------------------
+#  哪些文件/目录不要提交到 GitHub：
+#    - OpenWrt 编译产生的所有临时文件和产物
+#    - 工作流生成的临时环境变量文件
+#    - 本地编辑器/系统产生的垃圾文件
+#
+#  这条规则很重要！如果不排除编译产物，一旦有人不小心把 bin/ 下的
+#  固件镜像 commit 上去，仓库会变得极其臃肿，GitHub 也会拒绝大文件
+# ==========================================================================
+
+# ---------- OpenWrt 编译产物 ----------
+# bin/     = 编译出来的固件镜像（.img.gz 等），由 Release 发布，不进仓库
+# build/   = 中间编译文件
+# dl/      = 下载的源码包（编译时自动下载，可本地缓存）
+# staging_dir/ = staging 临时目录
+# tmp/     = 编译临时文件
+openwrt/bin/
+openwrt/build/
+openwrt/dl/
+openwrt/staging_dir/
+openwrt/tmp/
+openwrt/logs/
+openwrt/.config
+openwrt/.config.old
+
+# ---------- OpenWrt 源码本体 ----------
+# openwrt/ 目录是 git clone 下来的 lede 源码，完全不需要提交
+openwrt/
+
+# ---------- 工作流临时文件 ----------
+# 工作流运行过程中生成的临时环境变量文件
+build_info.env
+release.txt
+
+# ---------- 本地固件上传目录 ----------
+firmware/
+
+# ---------- 编辑器和系统垃圾文件 ----------
+# macOS 的 .DS_Store
+.DS_Store
+# Windows 的 Thumbs.db
+Thumbs.db
+# VS Code 工作区设置（可选：如果想共享可删掉下面这行）
+# .vscode/
+# JetBrains IDE
+.idea/
+# 临时文件
+*.tmp
+*.swp
+*~

@@ -179,10 +179,15 @@ jobs:
         run: |
           # 如果仓库有 files/ 目录，复制进 openwrt/files/（OpenWrt 会自动识别这个路径）
           if [ -d "$GITHUB_WORKSPACE/files" ]; then
-              # 注意：不能简单 cp -rf，因为 openwrt/files 可能已存在（空的）
+              # 关键：先确保目标目录存在。lede 源码 clone 下来后顶层没有 files/ 目录，
+              # 如果不 mkdir -p，后面的 cp -r 会静默失败（被 2>/dev/null 吞掉），
+              # 固件里就不会有 /etc/uci-defaults/zzz-custom-settings，LAN IP/密码设置全丢
+              mkdir -p openwrt/files/
               # 用 cp -r 的源目录通配方式，把 files/ 下的内容合并进去
               cp -r "$GITHUB_WORKSPACE/files/"* openwrt/files/ 2>/dev/null || true
-              echo "已复制 files/ 到 openwrt/files/"
+              # 给 /etc/uci-defaults/ 下的脚本加可执行权限（Windows clone 下来没有 +x）
+              find openwrt/files -type f -path '*/uci-defaults/*' -exec chmod +x {} \; 2>/dev/null || true
+              echo "已复制 files/ 到 openwrt/files/（uci-defaults 脚本已 chmod +x）"
               # 打印复制进去的内容，方便确认
               find openwrt/files -type f 2>/dev/null | head -20 || echo "（files/ 为空或不存在）"
           else
@@ -345,7 +350,8 @@ jobs:
 
           # ---- 收集插件清单 ----
           # 从最终 .config 里筛出所有已启用的 luci 应用 + 主题 + 独立插件，一行一个
-          PLUGINS=$(grep -E '^CONFIG_PACKAGE_(luci-app-[a-z0-9_-]+|luci-theme-[a-z0-9_-]+|ddnsto|adguardhome|AdGuardHome|smartdns|open-app-filter|oaf|easytier|mwan3)=y' \
+          # 说明：luci-ssl 不以 luci-app- 开头，需要单独列出；kmod-* 驱动包不算插件
+          PLUGINS=$(grep -E '^CONFIG_PACKAGE_(luci-app-[a-z0-9_-]+|luci-theme-[a-z0-9_-]+|luci-ssl|ddnsto|adguardhome|AdGuardHome|smartdns|open-app-filter|oaf|easytier|mwan3)=y' \
                     "$GITHUB_WORKSPACE/openwrt/.config" \
                     | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' | sort -u)
           echo "$PLUGINS" > "$GITHUB_WORKSPACE/firmware/plugins.txt"
@@ -357,63 +363,65 @@ jobs:
       # 这份说明会直接显示在 GitHub Release 页面
       - name: 生成发布说明
         run: |
-          # 用 heredoc 写入 release.txt，注意 EOF 标记前后不要有空格
-          # $ENV_VAR 会被 bash 自动展开为环境变量的值
+          # 用 heredoc 写入 release.txt
+          # 注意：<<'HEREDOC_EOF' 单引号表示不展开 bash 变量
+          # 注意：heredoc 内部所有行（包括 HEREDOC_EOF 标记）必须缩进和 run: | 块一致
+          #       否则 YAML 解析器会把顶格行当作 block 终止，GitHub Actions 加载失败！
           cat > release.txt <<'HEREDOC_EOF'
-============================================
- OpenWrt (lede) X86_64 固件发布说明
-============================================
+          ============================================
+           OpenWrt (lede) X86_64 固件发布说明
+          ============================================
 
-【固件版本】
-HEREDOC_EOF
-          # 这里用 echo 追加带变量的行（heredoc 单引号不展开变量）
+          【固件版本】
+          HEREDOC_EOF
+          # 用 echo 追加带变量的行（heredoc 里写死的部分和变量部分分开处理）
           echo "$SOURCE_VER（lede master 快照）" >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【内核版本】
-HEREDOC_EOF
+          【内核版本】
+          HEREDOC_EOF
           echo "Linux $KERNEL_VER" >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【默认 LAN IP（管理地址）】
-HEREDOC_EOF
+          【默认 LAN IP（管理地址）】
+          HEREDOC_EOF
           echo "$LAN_IP" >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【登录账号】
-HEREDOC_EOF
+          【登录账号】
+          HEREDOC_EOF
           echo "$LAN_USER" >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【登录密码】
-HEREDOC_EOF
+          【登录密码】
+          HEREDOC_EOF
           echo "$LAN_PASSWORD（首次登录后请立即修改！）" >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【已集成插件】（一行一个）
-HEREDOC_EOF
+          【已集成插件】（一行一个）
+          HEREDOC_EOF
           cat firmware/plugins.txt >> release.txt
           echo "" >> release.txt
 
           cat >> release.txt <<'HEREDOC_EOF'
-【镜像文件说明】
-  - combined-efi.img.gz : UEFI 启动（新电脑/新虚拟机首选，推荐）
-  - combined.img.gz     : BIOS 传统启动（老主板）
-  - squashfs            : squashfs 分区（支持恢复出厂设置，推荐）
-  - .img.gz 下载后解压一次得到 .img 再刷入
+          【镜像文件说明】
+            - combined-efi.img.gz : UEFI 启动（新电脑/新虚拟机首选，推荐）
+            - combined.img.gz     : BIOS 传统启动（老主板）
+            - squashfs            : squashfs 分区（支持恢复出厂设置，推荐）
+            - .img.gz 下载后解压一次得到 .img 再刷入
 
-【刷机后操作】
-  1. 将下载的 .img.gz 解压得到 .img
-  2. 写入 U 盘或虚拟机磁盘（Win32 Disk Imager / dd）
-  3. 启动设备，浏览器访问上面的 LAN IP 进入管理后台
-  4. 首次登录后立即修改密码
-============================================
-HEREDOC_EOF
+          【刷机后操作】
+            1. 将下载的 .img.gz 解压得到 .img
+            2. 写入 U 盘或虚拟机磁盘（Win32 Disk Imager / dd）
+            3. 启动设备，浏览器访问上面的 LAN IP 进入管理后台
+            4. 首次登录后立即修改密码
+          ============================================
+          HEREDOC_EOF
 
           echo "--- 发布说明预览 ---"
           cat release.txt

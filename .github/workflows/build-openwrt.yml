@@ -1,144 +1,432 @@
-name: Build OpenWrt (x86/64)
+# ==========================================================================
+#  OpenWrt (lede) X86_64 云编译工作流
+# --------------------------------------------------------------------------
+#  这个文件做什么：
+#    在 GitHub Actions 的 Ubuntu 22.04 虚拟机上全自动编译 OpenWrt 固件。
+#    完整流程：拉取 lede 最新源码 → 添加第三方源 → 下载独立插件 →
+#    应用固件内置文件 → 运行预处理脚本 → 编译 → 生成 Release 发布页
+#
+#  目录约定（配合仓库根目录结构）：
+#    configs/x86_64.config              ← 你的固件配置（勾选哪些插件、驱动）
+#    custom-feeds.conf                 ← 第三方软件源地址
+#    files/                             ← 固件内置文件（开机脚本、默认配置）
+#    scripts/extra.sh                   ← 编译前预处理脚本
+#    custom-packages/                   ← 本地额外包（可选）
+#
+#  怎么用：
+#    1. 想加插件 → 改 configs/x86_64.config（加 CONFIG_PACKAGE_xxx=y）
+#    2. 想加第三方源 → 改 custom-feeds.conf
+#    3. 想改固件默认行为 → 改 files/etc/uci-defaults/zzz-custom-settings
+#    4. 开始编译 → Actions → Run workflow
+#    5. 下载固件 → 仓库 Releases 页面
+#
+#  小知识：
+#    - GitHub 公共仓库 Actions 完全免费，单次任务最长 6 小时
+#    - 本编译约 2~4 小时，完全够用
+#    - ubuntu-22.04 runner 将于 2026-09-17 弃用，到时改 runs-on 为 ubuntu-24.04 即可
+# ==========================================================================
 
+# 工作流在 Actions 页面显示的名字
+name: 云编译 OpenWrt X86_64 固件
+
+# ----------------------- 什么时候触发编译 -----------------------
 on:
-  repository_dispatch:
+  # 手动触发：在 Actions 页面点击 "Run workflow"
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: 'SSH connection to Actions (true/false)'
-        required: false
-        default: 'false'
-      version:
-        description: 'OpenWrt version tag (e.g. 2024.x) or leave empty for latest'
-        required: false
-        default: ''
+  # 想每天自动编译一次？删掉下面三行的 # 注释即可
+  # schedule:
+  #   - cron: '0 18 * * *'        # UTC 18:00 = 北京时间凌晨 2 点左右
 
+# ----------------------- 全局变量 -----------------------
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: config/x86-64.config
-  CUSTOM_CONFIG: config/custom.config
-  DIY_SH: scripts/02-custom-feed.sh
-  CUSTOM_SH: scripts/03-custom-config.sh
-  UPLOAD_RELEASE: true
-  TZ: Asia/Shanghai
+  REPO_URL: https://github.com/coolsnowwolf/lede           # OpenWrt lede 源码地址
+  REPO_BRANCH: master                                      # 跟踪 lede master 分支（最新）
+  CONFIG_FILE: configs/x86_64.config                       # 自定义配置文件位置（注意是 configs 复数）
+  CUSTOM_FEEDS: custom-feeds.conf                         # 第三方软件源配置文件
+  EASYTIER_URL: https://github.com/EasyTier/luci-app-easytier   # EasyTier 官方仓库（luci界面+主程序包）
+  OPENAPPFILTER_URL: https://github.com/destan19/OpenAppFilter   # 应用过滤插件（独立仓库）
+  TZ: Asia/Shanghai                                        # 日志显示北京时间
 
+# ----------------------- 权限 -----------------------
+# 允许本工作流创建 Release（发布固件需要写仓库权限）
+permissions:
+  contents: write
+
+# ----------------------- 编译主任务 -----------------------
 jobs:
   build:
+    # ---------- 编译机系统：按要求使用 Ubuntu 22.04 ----------
+    # 注意：GitHub 已宣布 ubuntu-22.04 于 2026-09-17 开始弃用，2027-04-17 完全退役。
+    #       到时候只需把下面一行改成 ubuntu-24.04，其余步骤无需改动。
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+
+    # ----------------------- 步骤开始 -----------------------
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        chmod +x scripts/*.sh
-        ./scripts/01-init-env.sh
+      # ============ 第 1 步：检出本仓库代码 ============
+      # 目的：拿到 configs/x86_64.config、custom-feeds.conf、files/、scripts/extra.sh
+      - name: 检出本仓库代码
+        uses: actions/checkout@v4
 
-    - name: Clone OpenWrt (lede) source
-      id: clone
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        if [ -n "${{ github.event.inputs.version }}" ]; then
+      # ============ 第 2 步：初始化编译环境 ============
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive   # apt 交互提问全部自动应答，避免流程卡住
+        run: |
+          # 把系统时区改成北京时间，日志时间看起来更直观
+          sudo timedatectl set-timezone "$TZ"
+          # 打印系统版本，确认确实运行在 Ubuntu 22.04 上
+          lsb_release -a || cat /etc/os-release
+
+      # ============ 第 3 步：释放磁盘空间 ============
+      # 原因：OpenWrt 完整编译需要约 35GB 空间，GitHub 默认镜像预装了
+      #       .NET / Android SDK / GHC / CodeQL 等大块头，删掉可多出约 40GB
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* \
+                      /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL
+          # 清空 Docker 预装镜像（本次编译用不到）
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          # 打印当前磁盘剩余空间，确认清理效果
+          df -hT
+
+      # ============ 第 4 步：安装编译依赖 ============
+      # 这是 lede 官方 README 给出的 Ubuntu 依赖清单
+      # 注意：如果后面编译报缺少某个库，通常在这里补装即可
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint \
+            binutils bison build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool \
+            lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool lld llvm lrzsz \
+            genisoimage msmtp nano ninja-build p7zip p7zip-full patch pkgconf \
+            python3 python3-pip python3-ply python3-docutils python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd \
+            libfuse-dev libnsl-dev libncurses5-dev zlib1g-dev zstd
+
+      # ============ 第 5 步：拉取 lede 最新源码 ============
+      # --depth 1 是"浅克隆"：只取最新一次提交，下载量小、速度快
+      - name: 拉取 lede 最新源码
+        run: |
+          git clone --depth 1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          # 打印当前源码版本（提交时间 + 短哈希），稍后写进发布页
+          git -C openwrt log -1 --format='源码版本: lede master @ %cd (%h)' --date=format:'%Y-%m-%d %H:%M'
+
+      # ============ 第 6 步：添加第三方软件源 ============
+      # 原理：lede 内置 feeds.conf.default 只包含官方源，我们把 custom-feeds.conf
+      #       里的第三方源追加进去。这样用户只改 custom-feeds.conf 就能加源，
+      #       不用动 YML 文件。
+      - name: 添加第三方软件源
+        run: |
           cd openwrt
-          git fetch --depth 1 origin tag ${{ github.event.inputs.version }}
-          git checkout ${{ github.event.inputs.version }}
-        fi
-        echo "status=success" >> $GITHUB_OUTPUT
+          # 把仓库根目录的 custom-feeds.conf 追加进源码的 feeds.conf.default
+          if [ -f "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" ]; then
+              echo "" >> feeds.conf.default
+              echo "# ===== 第三方源（来自 custom-feeds.conf）=====" >> feeds.conf.default
+              cat "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" >> feeds.conf.default
+          fi
+          # 展示最终的软件源列表，方便在日志里确认
+          echo "--- 最终 feeds.conf.default ---"
+          cat feeds.conf.default
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_SH
+      # ============ 第 7 步：下载独立插件源码 ============
+      # 原因：有些插件不是标准 feeds 仓库，而是单个 package 目录发布的，
+      #       直接克隆到 openwrt/package/ 下即可参与编译。
+      #       - OpenAppFilter（应用过滤）：destan19/OpenAppFilter
+      #       - EasyTier：官方仓库结构比较特殊，有三个子包，需分开提取
+      - name: 下载独立插件源码
+        run: |
+          cd openwrt
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+          # --- OpenAppFilter（应用过滤）---
+          # 直接克隆整个仓库到 package/OpenAppFilter
+          git clone --depth 1 "$OPENAPPFILTER_URL" package/OpenAppFilter
 
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+          # --- EasyTier（去中心化组网）---
+          # EasyTier 仓库根目录不是 OpenWrt package 格式，它的包在子目录里：
+          #   luci-app-easytier/  ← LuCI 管理界面（包名 luci-app-easytier）
+          #   easytier/           ← 主程序（包名 easytier）
+          #   easytier-noweb/     ← 无 Web 界面版本（一般不用）
+          # 策略：先 clone 到临时目录，再把需要的子目录复制进 package/
+          git clone --depth 1 "$EASYTIER_URL" /tmp/easytier-upstream
+          # 只复制我们需要的两个子包目录
+          cp -r /tmp/easytier-upstream/luci-app-easytier package/luci-app-easytier
+          cp -r /tmp/easytier-upstream/easytier package/easytier
+          # 清理临时目录（省空间）
+          rm -rf /tmp/easytier-upstream
 
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && cp -rf files openwrt/files
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
-        chmod +x $CUSTOM_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$CUSTOM_SH
-        # Merge custom.config (append extra packages)
-        if [ -e $GITHUB_WORKSPACE/$CUSTOM_CONFIG ]; then
-          cat $GITHUB_WORKSPACE/$CUSTOM_CONFIG >> .config
-        fi
+          # 确认结果：打印 package/ 下新增的插件目录名
+          echo "--- 已添加到 package/ 的独立插件 ---"
+          ls -d package/OpenAppFilter package/luci-app-easytier package/easytier 2>/dev/null
 
-    - name: SSH connection to Actions
-      uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      env:
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      # ============ 第 8 步：复制固件内置文件 ============
+      # 原理：仓库根目录的 files/ 下的文件会被 OpenWrt 构建系统原样复制进固件根目录。
+      #       比如 files/etc/uci-defaults/zzz-custom-settings 会变成
+      #       固件里的 /etc/uci-defaults/zzz-custom-settings，在路由器首次启动时自动执行。
+      #       这个机制用来做"固件内置定制"（默认 LAN IP、密码、主题等），
+      #       比编译时 sed 修改源码更干净、更可移植。
+      - name: 复制固件内置文件
+        run: |
+          # 如果仓库有 files/ 目录，复制进 openwrt/files/（OpenWrt 会自动识别这个路径）
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+              # 注意：不能简单 cp -rf，因为 openwrt/files 可能已存在（空的）
+              # 用 cp -r 的源目录通配方式，把 files/ 下的内容合并进去
+              cp -r "$GITHUB_WORKSPACE/files/"* openwrt/files/ 2>/dev/null || true
+              echo "已复制 files/ 到 openwrt/files/"
+              # 打印复制进去的内容，方便确认
+              find openwrt/files -type f 2>/dev/null | head -20 || echo "（files/ 为空或不存在）"
+          else
+              echo "仓库没有 files/ 目录，跳过"
+          fi
 
-    - name: Download packages
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      # ============ 第 9 步：运行编译前预处理脚本 ============
+      # 这个脚本可以做：grep 排查依赖、给源码打补丁、修改 Makefile 等
+      # 如果你不需要预处理，scripts/extra.sh 可以保持为空
+      - name: 运行编译前预处理脚本
+        run: |
+          # 给脚本加可执行权限（Windows 上 clone 下来可能没有 +x）
+          chmod +x scripts/extra.sh
+          # 运行脚本，传入 openwrt 源码目录路径
+          bash scripts/extra.sh openwrt
 
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
+      # ============ 第 10 步：更新并安装软件源 ============
+      # update   = 把各软件源的代码下载到 feeds/ 目录
+      # install  = 在 OpenWrt 构建系统里注册这些软件包
+      # 顺序很重要：必须先装好软件源，再应用 config，
+      #            否则 make defconfig 不认识 config 里的包名，会把它们悄悄丢掉
+      - name: 更新并安装软件源
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: Generate release info
-      run: |
-        chmod +x scripts/04-gen-release-info.sh
-        ./scripts/04-gen-release-info.sh
-      env:
-        GITHUB_WORKSPACE: ${{ github.workspace }}
+      # ============ 第 11 步：应用自定义配置 ============
+      # 目的：把仓库 configs/x86_64.config 复制成 OpenWrt 源码下的 .config
+      # .config 是 OpenWrt 编译的"主配置文件"，make 时读它决定编译什么
+      - name: 应用自定义配置
+        run: |
+          cp -f "$CONFIG_FILE" openwrt/.config
+          echo "已写入自定义配置: $CONFIG_FILE"
 
-    - name: Organize files
-      id: organize
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      # ============ 第 12 步：生成完整编译配置 ============
+      # 原因：x86_64.config 里只写了我们关心的少数选项，
+      #       make defconfig 会自动补全所有依赖项（比如选了 luci-app-mwan3 会自动
+      #       选中它依赖的 luci、mwan3 等），生成一份完整可用的 .config
+      # 注意：defconfig 会静默丢弃"不认识的配置行"（包名写错/源里没有该包/依赖
+      #       不满足都会被直接删掉），所以下一步必须校验，防止静默出错固件
+      - name: 生成完整编译配置
+        run: |
+          cd openwrt
+          make defconfig
 
-    - name: Upload firmware to artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: OpenWrt-x86-64
-        path: ${{ env.FIRMWARE }}
+      # ============ 第 13 步：上传最终配置文件（调试用）========
+      # 目的：把 defconfig 生成的完整 .config 存为构建产物。
+      #       万一固件里缺插件，下载这个文件一查便知"配置层面"有没有装上
+      - name: 上传最终配置文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-final-config
+          path: openwrt/.config
 
-    - name: Upload release info to artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-info
-        path: release-info/
+      # ============ 第 14 步：校验插件是否被正确启用 ============
+      # 目的：逐个核对 config 里写的插件在最终 .config 中是否真的启用了。
+      #       如果有丢失，立刻报错并列出原因提示，绝不静默编译出缺插件的固件
+      - name: 校验插件是否被正确启用
+        run: |
+          cd openwrt
+          # 从自定义 config 种子里提取所有手动启用的包名（CONFIG_PACKAGE_xxx=y）
+          WANTED=$(grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_-]+=y' "$GITHUB_WORKSPACE/$CONFIG_FILE" \
+                   | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//')
+          MISSING=""
+          for p in $WANTED; do
+            # 在最终 .config 里找这个包是否真的处于启用状态
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config || MISSING="$MISSING $p"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "=================================================="
+            echo "以下配置项被 make defconfig 丢弃了（固件里将不会有它们）："
+            for p in $MISSING; do echo "  - $p"; done
+            echo ""
+            echo "常见原因："
+            echo "  1) 包名写错（必须和源里完全一致，区分大小写和横线）"
+            echo "  2) 该包不在当前任何软件源里（需要先添加对应源）"
+            echo "  3) 该包依赖的东西不满足（比如依赖的内核模块没开）"
+            echo ""
+            echo "下面自动在软件源里搜索相近的包名，供参考："
+            for p in $MISSING; do
+              kw=$(echo "$p" | sed -E 's/^luci-(app|theme)-//')
+              echo "--- 搜索: $kw ---"
+              find feeds package -maxdepth 3 -type d -iname "*${kw}*" 2>/dev/null || echo "  (没有找到)"
+            done
+            echo "=================================================="
+            exit 1
+          fi
+          echo "校验通过：config 里的所有插件和驱动均已正确启用"
 
-    - name: Generate release tag
-      id: tag
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+      # ============ 第 15 步：预下载全部源码包 ============
+      # 原因：先统一下载再编译，遇到网络原因下载失败可以在这里快速重试，
+      #       不会浪费已经编译好的部分
+      - name: 预下载源码包
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          # 体积异常小（小于 1KB）的文件说明下载不完整，直接删掉防止解压出错
+          echo "正在检查异常小文件..."
+          find dl -size -1024c -exec ls -l {} \; 2>/dev/null
+          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v2
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release-info/release-body.md
-        files: |
-          ${{ env.FIRMWARE }}/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ============ 第 16 步：开始编译固件 ============
+      # 先用全部 CPU 核心并行编译；万一失败则回退成单线程 + 详细日志（V=s），
+      # 这样既快，又能在出错时从日志里看清具体是哪个包编译失败
+      - name: 开始编译
+        run: |
+          cd openwrt
+          echo "编译开始时间: $(date)"
+          echo "CPU 核心数: $(nproc)"
+          # 并行编译（快），失败后回退单线程详细日志（便于定位问题）
+          make -j$(nproc) || make -j1 V=s
+          echo "编译结束时间: $(date)"
+
+      # ============ 第 17 步：收集编译产物（只挑 IMG 镜像）========
+      # 原因：编译会生成很多文件，这里只把 .img.gz 镜像和校验文件挑出来发布。
+      #       configs/x86_64.config 里已关掉 VMDK/VHDX/QCOW2 等格式，所以只有 IMG。
+      # 同时收集"发布页"需要展示的所有信息：LAN IP、账号密码、内核版本、插件清单
+      - name: 收集固件文件和发布信息
+        run: |
+          # ---- 收集固件镜像 ----
+          cd openwrt/bin/targets/x86/64
+          mkdir -p "$GITHUB_WORKSPACE/firmware"
+          # 只复制 .img.gz 镜像
+          cp -v *.img.gz "$GITHUB_WORKSPACE/firmware/"
+          # 复制官方生成的 SHA256 校验文件，方便下载后核对完整性
+          cp -v sha256sums "$GITHUB_WORKSPACE/firmware/" || true
+          ls -lh "$GITHUB_WORKSPACE/firmware/"
+
+          # ---- 收集发布元信息 ----
+          # Release 标签（每次构建唯一）
+          echo "TAG_NAME=OpenWrt-x86_64-$(date +%Y%m%d%H%M)" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=OpenWrt X86_64 固件 $(date +'%Y年%m月%d日 %H:%M')" >> "$GITHUB_ENV"
+
+          # 源码版本：lede 最新提交的 日期-短哈希
+          echo "SOURCE_VER=$(git -C "$GITHUB_WORKSPACE/openwrt" log -1 --format='%cd-%h' --date=format:'%Y%m%d')" >> "$GITHUB_ENV"
+
+          # 内核版本：从最终 .config 提取 CONFIG_LINUX_x_y（如 6.12）
+          KERNEL_VER=$(grep -E '^CONFIG_LINUX_[0-9]+_[0-9]+=y' "$GITHUB_WORKSPACE/openwrt/.config" \
+                      | head -n1 | sed -E 's/^CONFIG_LINUX_//; s/=y$//; s/_/./')
+          [ -n "$KERNEL_VER" ] || KERNEL_VER=未知
+          echo "KERNEL_VER=$KERNEL_VER" >> "$GITHUB_ENV"
+
+          # ---- LAN IP / 账号 / 密码：从 files/uci-defaults 里提取 ----
+          # 因为现在固件定制已改成 files/ 内置方式（不再是 compile-time sed），
+          # 所以从 files/etc/uci-defaults/zzz-custom-settings 里 grep 出默认值
+          UCI_FILE="$GITHUB_WORKSPACE/files/etc/uci-defaults/zzz-custom-settings"
+          if [ -f "$UCI_FILE" ]; then
+              # LAN IP: 匹配 uci set network.lan.ipaddr='xxx.xxx.xxx.xxx'
+              LAN_IP=$(grep -oP "network\.lan\.ipaddr='\K[^']+" "$UCI_FILE" 2>/dev/null || echo "192.168.1.1")
+              # 密码: 匹配 printf 'password\n 那行第一个单引号里的内容
+              LAN_PASSWORD=$(grep -oP "printf '\K[^']+" "$UCI_FILE" 2>/dev/null | head -n1 || echo "password")
+          else
+              LAN_IP="192.168.1.1"
+              LAN_PASSWORD="password"
+          fi
+          echo "LAN_IP=$LAN_IP" >> "$GITHUB_ENV"
+          echo "LAN_USER=root" >> "$GITHUB_ENV"      # OpenWrt 固定 root，不用改
+          echo "LAN_PASSWORD=$LAN_PASSWORD" >> "$GITHUB_ENV"
+
+          # ---- 收集插件清单 ----
+          # 从最终 .config 里筛出所有已启用的 luci 应用 + 主题 + 独立插件，一行一个
+          PLUGINS=$(grep -E '^CONFIG_PACKAGE_(luci-app-[a-z0-9_-]+|luci-theme-[a-z0-9_-]+|ddnsto|adguardhome|AdGuardHome|smartdns|open-app-filter|oaf|easytier|mwan3)=y' \
+                    "$GITHUB_WORKSPACE/openwrt/.config" \
+                    | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' | sort -u)
+          echo "$PLUGINS" > "$GITHUB_WORKSPACE/firmware/plugins.txt"
+          echo "--- 已集成插件清单 ---"
+          cat "$GITHUB_WORKSPACE/firmware/plugins.txt"
+
+      # ============ 第 18 步：生成发布说明 ============
+      # 包含：固件版本、内核版本、LAN IP、账号密码、插件清单（一行一个）
+      # 这份说明会直接显示在 GitHub Release 页面
+      - name: 生成发布说明
+        run: |
+          # 用 heredoc 写入 release.txt，注意 EOF 标记前后不要有空格
+          # $ENV_VAR 会被 bash 自动展开为环境变量的值
+          cat > release.txt <<'HEREDOC_EOF'
+============================================
+ OpenWrt (lede) X86_64 固件发布说明
+============================================
+
+【固件版本】
+HEREDOC_EOF
+          # 这里用 echo 追加带变量的行（heredoc 单引号不展开变量）
+          echo "$SOURCE_VER（lede master 快照）" >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【内核版本】
+HEREDOC_EOF
+          echo "Linux $KERNEL_VER" >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【默认 LAN IP（管理地址）】
+HEREDOC_EOF
+          echo "$LAN_IP" >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【登录账号】
+HEREDOC_EOF
+          echo "$LAN_USER" >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【登录密码】
+HEREDOC_EOF
+          echo "$LAN_PASSWORD（首次登录后请立即修改！）" >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【已集成插件】（一行一个）
+HEREDOC_EOF
+          cat firmware/plugins.txt >> release.txt
+          echo "" >> release.txt
+
+          cat >> release.txt <<'HEREDOC_EOF'
+【镜像文件说明】
+  - combined-efi.img.gz : UEFI 启动（新电脑/新虚拟机首选，推荐）
+  - combined.img.gz     : BIOS 传统启动（老主板）
+  - squashfs            : squashfs 分区（支持恢复出厂设置，推荐）
+  - .img.gz 下载后解压一次得到 .img 再刷入
+
+【刷机后操作】
+  1. 将下载的 .img.gz 解压得到 .img
+  2. 写入 U 盘或虚拟机磁盘（Win32 Disk Imager / dd）
+  3. 启动设备，浏览器访问上面的 LAN IP 进入管理后台
+  4. 首次登录后立即修改密码
+============================================
+HEREDOC_EOF
+
+          echo "--- 发布说明预览 ---"
+          cat release.txt
+
+      # ============ 第 19 步：发布 Release ============
+      # 把固件 + 校验文件 + 发布说明 一起上传到仓库 Releases 页面
+      # 任何人都可以直接下载使用
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}              # Release 标签（每次构建唯一）
+          name: ${{ env.RELEASE_NAME }}              # Release 标题
+          body_path: release.txt                     # 上一步生成的发布说明（完整展示）
+          files: |
+            firmware/*.img.gz                       # 固件镜像
+            firmware/sha256sums                     # 校验文件

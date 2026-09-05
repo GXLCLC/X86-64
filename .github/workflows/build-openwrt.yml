@@ -68,6 +68,21 @@ jobs:
       - name: 检出本仓库代码
         uses: actions/checkout@v4
 
+      # ============ 第 1.5 步：统一换行符为 LF ============
+      # 原因：Windows 上 Git clone 下来的文件默认是 CRLF 换行符。
+      #       Linux 下 bash 脚本、Perl 脚本、feeds.conf 等对 CRLF 极度敏感：
+      #         - feeds update 会报 "Syntax error in feeds.conf.default"
+      #         - bash 脚本会报 "/bin/bash^M: bad interpreter"
+      #         - OpenWrt 的 uci-defaults 脚本不会执行
+      #       所以在所有事情开始前，把仓库里所有文本文件统一转成 LF
+      - name: 统一换行符为 LF
+        run: |
+          # apt-get 装 dos2unix（如果没有）
+          sudo apt-get update -qq && sudo apt-get install -y -qq dos2unix >/dev/null 2>&1 || true
+          # 转换仓库根目录下所有文本文件（跳过 .git 目录）
+          find . -type f -not -path './.git/*' -exec dos2unix {} + 2>/dev/null || true
+          echo "已统一换行符为 LF"
+
       # ============ 第 2 步：初始化编译环境 ============
       - name: 初始化编译环境
         env:
@@ -129,16 +144,24 @@ jobs:
       - name: 添加第三方软件源
         run: |
           cd openwrt
-          # 把仓库根目录的 custom-feeds.conf 追加进源码的 feeds.conf.default
+
           if [ -f "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" ]; then
+              # 关键：Windows 上 clone 下来的文件是 CRLF 换行符，Linux 下会让 Perl feeds 脚本报
+              # "Syntax error in feeds.conf.default"！必须先把 \r\n 转成 \n。
+              # 同时用 grep 过滤只保留 src-git 开头的有效配置行，跳过注释和空行，
+              # 让最终追加进去的内容完全干净，避免任何格式问题
               echo "" >> feeds.conf.default
               echo "# ===== 第三方源（来自 custom-feeds.conf）=====" >> feeds.conf.default
-              cat "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" >> feeds.conf.default
+              sed 's/\r$//' "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" \
+                  | grep -E '^src-(git|svn|link)' \
+                  >> feeds.conf.default
           fi
-          # 展示最终的软件源列表，方便在日志里确认
+          # 展示最终的软件源列表，方便在日志里确认是否格式正确
           echo "--- 最终 feeds.conf.default ---"
-          cat feeds.conf.default
-
+          cat -A feeds.conf.default | tail -20   # cat -A 显示换行符，检查是否有 ^M(CR)
+          echo ""
+          echo "--- feeds 源列表（只看 src- 行）---"
+          grep -E '^src-' feeds.conf.default
       # ============ 第 7 步：下载独立插件源码 ============
       # 原因：有些插件不是标准 feeds 仓库，而是单个 package 目录发布的，
       #       直接克隆到 openwrt/package/ 下即可参与编译。

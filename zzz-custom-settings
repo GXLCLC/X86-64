@@ -1,0 +1,59 @@
+#!/bin/sh
+# ==========================================================================
+#  固件首次启动自动执行的定制脚本（OpenWrt uci-defaults 机制）
+# --------------------------------------------------------------------------
+#  工作原理：
+#    files/ 目录下的文件会被 OpenWrt 构建系统原样复制到固件根目录。
+#    /etc/uci-defaults/ 目录里的脚本在路由器【首次启动时】自动执行一次，
+#    执行完毕后会被系统自动删除（确保只跑一次，后续重启不重复）。
+#    这是 OpenWrt 官方推荐的"固件内置定制"方式，干净、不碰源码、可移植。
+#
+#  修改这里的值就等于"改固件默认行为"：
+#    - 想改默认 LAN IP？ 改下面 lan.ipaddr 的值
+#    - 想改默认密码？    改下面 passwd root 那行
+#    - 想换主题？        改 luci.main.mediaurlbase
+#    - 想改主机名？      改 system.@system[0].hostname
+#
+#  脚本开头的 zzz- 是故意的：让它在系统自带的 uci-defaults 脚本之后执行
+#  （因为按文件名排序，zzz- 在最末尾），确保我们的设置能覆盖默认值
+# ==========================================================================
+
+# ====================== 网络设置 ======================
+# 修改 LAN 口 IP 地址（路由器管理地址，刷完固件后浏览器访问它进后台）
+# 改成 192.168.1.1 以外的地址可以避免和上游主路由网段冲突
+uci set network.lan.ipaddr='192.168.1.1'
+
+# LAN 子网掩码（/24 = 255.255.255.0，最常用，不用改）
+uci set network.lan.netmask='255.255.255.0'
+
+# 提交网络设置（不 commit 的话重启就丢了）
+uci commit network
+
+# ====================== LuCI 管理界面设置 ======================
+# 设置后台默认语言为简体中文（config 里需要 CONFIG_LUCI_LANG_zh_Hans=y 才有中文包）
+uci set luci.main.lang='zh_cn'
+
+# 把 Argon 设为默认主题（光在 config 里选上主题包不会自动启用它！必须显式写这行）
+# 如果固件里没装 argon，LuCI 会自动回退到默认主题，不会崩
+uci set luci.main.mediaurlbase='/luci-static/argon'
+
+uci commit luci
+
+# ====================== 系统设置 ======================
+# 设置时区为北京时间（Asia/Shanghai = UTC+8）
+uci set system.@system[0].timezone='Asia/Shanghai'
+uci set system.@system[0].zonename='Asia/Shanghai'
+
+# 设置主机名（路由器在局域网里显示的名字）
+uci set system.@system[0].hostname='OpenWrt'
+
+uci commit system
+
+# ====================== 账号密码设置 ======================
+# 默认登录账号是 root（OpenWrt 固定，一般不改）
+# 默认密码是 password（lede 官方默认值，建议首次登录后立即改成你自己的）
+# 如果想设空密码，注释掉下面的 printf 行即可
+printf 'password\npassword\n' | passwd root >/dev/null 2>&1
+
+# uci-defaults 脚本必须 exit 0 表示执行成功
+exit 0

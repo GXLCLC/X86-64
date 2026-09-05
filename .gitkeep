@@ -1,0 +1,18 @@
+# custom-packages 目录说明
+# 
+# 这个目录用来放【本地额外的 OpenWrt 软件包】。
+# 适用于：某些插件既不在 lede 内置源里，也不在任何第三方 feeds 里，
+# 你需要把它的源码直接克隆进来参与编译。
+#
+# 使用方法：
+#   1. 每个插件占一个子目录，目录里必须有 Makefile（OpenWrt 包格式）
+#   2. 可以手动 git clone：
+#      git clone https://github.com/someone/some-package.git custom-packages/some-package
+#   3. scripts/extra.sh 里有示例代码会自动把 custom-packages/* 复制到
+#      openwrt/package/ 下参与编译（去掉注释即可启用）
+#
+# 什么时候用：
+#   - 如果插件有标准的 OpenWrt feeds 仓库 → 优先写进 custom-feeds.conf
+#   - 如果插件只是单个 package 目录（如 OpenAppFilter、EasyTier luci-app）
+#     → 工作流会直接 git clone 到 package/，也不用放这里
+#   - 只有当你需要手动维护一个"不在任何外部仓库里"的包时，才需要这里

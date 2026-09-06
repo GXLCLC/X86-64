@@ -1,0 +1,11 @@
+# 本目录用于放置自定义 UCI 默认配置文件。
+#
+# 说明：files/ 目录下的内容会在编译时原样覆盖进固件根文件系统。
+#   - 直接放完整配置文件（如 network、system、dhcp）会整体替换系统默认配置，
+#     适合完全自定义；
+#   - 本仓库默认采用更稳妥的方式：通过 ../uci-defaults/99-custom-settings
+#     在首次开机时写入默认密码、LAN IP、Argon 主题等设置（只改指定项，
+#     不影响其他系统默认配置）。
+#
+# 如需添加自己的配置文件，把它们放到本目录即可，例如：
+#   files/etc/config/network   ->  固件 /etc/config/network

@@ -1,142 +1,128 @@
-# OpenWrt (lede) X86_64 云编译仓库
+# OpenWrt（LEDE）X86/64 云编译固件
 
-基于 GitHub Actions 的 OpenWrt X86_64 固件全自动编译仓库。使用 lede 最新源码，内置常用插件，编译完成自动发布 Release，可直接下载使用。
+基于 **Ubuntu 22.04** 的 GitHub Actions 全自动云编译仓库，拉取 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede) 最新源码，**仅编译 X86/64 平台**固件。
 
-## 目录结构
+编译过程**不使用 SSH 登录**、全程无人值守；固件**不包含任何代理插件**；编译完成后自动发布 GitHub Release，可直接下载 **IMG（.img.gz）** 镜像刷机使用。
+
+---
+
+## 一、固件特性
+
+- 仅产出 **IMG（.img.gz）** 镜像（同时含传统 BIOS 与 EFI 引导），不产出 VHDX / VMDK / VDI / ISO
+- **overlay（rootfs 分区）预留 2GiB 空间**（`CONFIG_TARGET_ROOTFS_PARTSIZE=2048`），可用于安装插件、存放配置
+- 使用 SquashFS 文件系统，支持「恢复出厂设置」（重置 overlay）
+- 默认 LAN IP：**192.168.1.1**，后台账号 **root** / 密码 **password**
+- 默认主题：**Argon**（后台默认中文）
+- 内置完整 **USB 驱动**与**有线/无线网卡驱动**（瑞昱 Realtek + 英特尔 Intel）
+- 支持挂载 U 盘/移动硬盘（vFAT / exFAT / NTFS）
+
+## 二、内置插件清单
+
+> Release 发布页会根据当次编译产物自动生成「已安装插件」清单（每行一个，附版本号），以下为固件内置的主要插件：
+
+- **luci-app-smartdns** —— SmartDNS 高性能 DNS 分流/加速（多上游并发查询，返回最快结果）
+- **luci-app-ddnsto** —— DDNSTO 远程访问/内网穿透（易有云，通过 ddns.to 域名访问后台）
+- **luci-app-adguardhome** —— AdGuardHome 全网广告/追踪域名拦截
+- **luci-app-oaf** —— OFA 应用过滤（OpenAppFilter，基于 DPI 的应用识别与过滤，可禁游戏/视频等）
+- **luci-app-turboacc** —— Turbo ACC 网络加速（flow offloading 流量分载 + BBR 拥塞控制）
+- **luci-app-mwan3** —— mwan3 多 WAN 负载均衡/策略分流（多线拨号、链路冗余）
+- **luci-app-nlbwmon** —— 带宽监控（按设备/时间统计流量）
+- **luci-app-easytier** —— EasyTier 去中心化虚拟组网/内网穿透（带 Web 配置界面）
+- **luci-theme-argon** —— Argon 主题（已设为默认主题）
+
+> 说明：SmartDNS / AdGuardHome / Turbo ACC / mwan3 / nlbwmon 直接来自 LEDE 自带 feeds；
+> DDNSTO 来自 LinkEase 官方 feed；Argon 主题、OFA、EasyTier 由 `scripts/diy-part1.sh` 自动拉取源码。
+
+## 三、驱动支持
+
+### USB 驱动
+
+- USB 2.0 / 3.0 主控（OHCI/UHCI/EHCI/XHCI）
+- USB 存储：U 盘、移动硬盘、UAS 高速存储
+- USB 有线网卡：ASIX（AX88179 等）、瑞昱 RTL8152/8153/8156、Aquantia AQC111（2.5G/5G）
+- USB 4G/5G 模组：CDC-Ether / CDC-NCM / RNDIS（含手机 USB 共享网络）
+- USB 键盘鼠标、USB 声卡
+
+### 有线网卡驱动
+
+- **英特尔 Intel**：e1000 / e1000e（I219/I210/I350）、igb（I210/I211/I350）、igc（I225/I226 2.5G）、ixgbe（82599/X520/X540/X550 万兆）、i40e（X710/XL710）、iavf
+- **瑞昱 Realtek**：r8169（通用）、r8168（官方千兆）、r8125-rss（RTL8125 2.5G）、r8126-rss（RTL8126 5G）
+- **英特尔无线**：iwlwifi 驱动 + 固件（笔记本/迷你主机自带 WiFi）
+
+## 四、固件版本信息
+
+- **源码**：coolsnowwolf/lede master 分支最新代码（每周五自动编译一次）
+- **内核版本**：跟随 LEDE master（当前为 Linux 6.12 系列），每次 Release 页面会标注当次实际内核版本
+- **固件版本/插件版本**：以 Release 发布页自动生成的清单为准（从编译产物 `.manifest` 提取，保证与实际固件完全一致）
+
+## 五、仓库目录结构
 
 ```
-├── .github/workflows/
-│   └── build-openwrt.yml          # 核心云编译工作流（GitHub Actions）
-├── configs/
-│   └── x86_64.config              # 固件配置文件（勾选哪些插件、驱动）
-├── custom-feeds.conf             # 自定义第三方软件源地址
-├── custom-packages/               # 本地额外 OpenWrt 包（可选）
-├── files/                         # 固件内置文件（开机脚本、默认配置）
-│   └── etc/uci-defaults/
-│       └── zzz-custom-settings    # 首次启动自动执行的固件定制脚本
+openwrt-build/
+├── .github/
+│   └── workflows/
+│       └── build-openwrt.yml   # GitHub Actions 工作流（核心，每步含中文注释）
+│
+├── config/
+│   └── x86-64.config           # X86/64 编译配置种子文件（可自行增删插件）
+│
+├── files/                      # 自定义文件，编译时原样覆盖进固件
+│   └── etc/
+│       ├── config/             # 自定义默认配置文件
+│       └── uci-defaults/
+│           └── 99-custom-settings  # 首启脚本：root密码/LAN IP/中文/Argon主题
+│
 ├── scripts/
-│   └── extra.sh                   # 编译前预处理脚本（可选）
-└── .gitignore
+│   ├── diy-part1.sh            # feeds 更新前：添加 DDNSTO 源、拉取第三方插件
+│   └── diy-part2.sh            # feeds 安装后：替换默认主题为 Argon 等
+│
+├── patches/                    # 自定义补丁目录（可选，放 .patch 文件）
+│
+├── .gitignore
+└── README.md
 ```
 
-## 固件默认信息
+## 六、如何使用
 
-| 项目 | 值 |
-|------|-----|
-| 管理地址（LAN IP） | `192.168.1.1` |
-| 登录账号 | `root` |
-| 登录密码 | `password` |
-| 管理后台语言 | 简体中文 |
-| 默认主题 | Argon |
-| overlay 空间 | 2GB |
-| 镜像格式 | 仅 IMG（BIOS + UEFI） |
+### 1. 直接下载固件（推荐普通用户）
 
-> ⚠️ **首次登录后请立即修改默认密码！**
+1. 进入本仓库的 **[Releases](../../releases)** 页面；
+2. 下载最新 Release 中的 `.img.gz` 镜像文件（与 `sha256sums.txt` 校验文件）；
+3. 刷机步骤见下方「刷机说明」。
 
-## 已集成插件
+> Release 页面包含：固件版本、内核版本、LAN IP、后台账号密码、镜像格式说明，
+> 以及**每行一个**的已安装插件清单（含版本号）。
 
-| 插件 | 说明 |
-|------|------|
-| luci-theme-argon | Argon 主题（默认） |
-| luci-app-turboacc | 网络加速（流量分载 + BBR） |
-| luci-app-smartdns | DNS 优化加速 |
-| luci-app-adguardhome | 全网去广告 |
-| luci-app-mwan3 | 多拨负载均衡 |
-| luci-app-nlbwmon | 带宽流量监控 |
-| luci-app-ddnsto + ddnsto | 内网穿透（DDNSTO） |
-| luci-app-easytier + easytier | 去中心化组网（EasyTier） |
-| luci-app-oaf | 应用过滤（OpenAppFilter） |
-| luci-app-upnp | UPnP 自动端口映射 |
-| luci-app-wol | 网络唤醒 |
-| luci-app-ttyd | 网页终端 |
+### 2. 自己触发云编译（推荐自定义用户）
 
-## 编译包含的驱动
+1. Fork 本仓库到你的 GitHub 账号；
+2. 进入仓库 **Actions** 页面 → 左侧选择「编译 LEDE X86-64 固件」→ 点击 **Run workflow**；
+3. 等待约 1~3 小时编译完成，固件会自动发布到你仓库的 Releases 页面；
+4. 此外每周五（UTC 16:25）会自动定时编译一次；修改 `config/`、`scripts/` 等文件推送后也会自动触发。
 
-**Intel 网卡**：e1000、e1000e、igb、igc、ixgbe
-**Realtek 网卡**：r8169
-**USB 网卡**：RNDIS、CDC-Ethernet、ASIX、RTL8150/8152
-**USB 存储**：usb2、usb3、usb-storage
-**文件系统**：NTFS、FAT32、exFAT
-**虚拟网卡**：TUN（EasyTier 依赖）
+### 3. 自定义插件 / 配置
 
-## 如何使用
+编辑 [`config/x86-64.config`](config/x86-64.config) 种子文件：
 
-### 1. 触发编译
+- 增加插件：添加一行 `CONFIG_PACKAGE_插件名=y`（依赖项由 `make defconfig` 自动补全）；
+- 去掉插件：删除对应行，或改为 `# CONFIG_PACKAGE_插件名 is not set`；
+- 修改 overlay 大小：调整 `CONFIG_TARGET_ROOTFS_PARTSIZE=` 的值（单位 MiB，2048 = 2GiB）；
+- 修改默认 IP / 密码：编辑 [`files/etc/uci-defaults/99-custom-settings`](files/etc/uci-defaults/99-custom-settings)，
+  同时同步修改工作流 `env` 中的 `LAN_IP` / `LOGIN_PASS`（保证 Release 页面说明一致）。
 
-1. Fork 本仓库到自己的 GitHub
-2. 进入 Actions 页面
-3. 选中 **"云编译 OpenWrt X86_64 固件"**
-4. 点击 **"Run workflow"** 按钮
-5. 等待约 2~4 小时（GitHub 公共仓库免费，单次最长 6 小时）
+提交后在 Actions 页面手动触发编译即可。
 
-### 2. 下载固件
+## 七、刷机说明
 
-编译完成后，在仓库 **Releases** 页面找到对应 Release，下载 `.img.gz` 文件。
+1. 下载 `.img.gz` 后解压得到 `.img`（balenaEtcher 等工具也可直接识别 `.gz`）；
+2. **UEFI 启动**的机器选择文件名带 **combined-efi** 的镜像；**传统 BIOS** 选择 **combined** 镜像；
+3. 使用 balenaEtcher / Rufus / physdiskwrite 等工具将 IMG 写入硬盘、电子盘或 CF 卡；
+4. 刷机后网线接 **LAN 口**，浏览器访问 `http://192.168.1.1`；
+5. 使用账号 `root` / 密码 `password` 登录，**首次登录后请立即在「系统 - 管理权」修改默认密码**。
 
-### 3. 刷机
+## 八、注意事项
 
-1. 解压 `.img.gz` 得到 `.img` 文件
-2. 用 [Win32 Disk Imager](https://sourceforge.net/projects/win32diskimager/)、[balenaEtcher](https://etcher.balena.io/) 或 `dd` 命令写入 U 盘或虚拟机磁盘
-3. 启动设备，浏览器访问 `192.168.1.1` 进入管理后台
-4. 首次登录后立即修改密码
-
-### 4. 固件镜像说明
-
-| 文件 | 用途 |
-|------|------|
-| `combined-efi.img.gz` | UEFI 启动（新电脑/新虚拟机，**推荐**） |
-| `combined.img.gz` | BIOS 传统启动（老主板） |
-
-## 如何自定义
-
-### 添加/删除插件
-
-编辑 `configs/x86_64.config`：
-
-```bash
-# 启用插件：
-CONFIG_PACKAGE_luci-app-qbittorrent=y
-
-# 禁用插件（两种方式任选）：
-# 方式 1：直接删除这一行
-# 方式 2：显式设为禁用
-# CONFIG_PACKAGE_luci-app-oaf is not set
-```
-
-> ⚠️ 包名必须和 OpenWrt 源里的名字**完全一致**（区分大小写和横线）。写错的话 `make defconfig` 会静默丢弃该行，导致编译出的固件缺插件。工作流有校验步骤，发现丢失会明确报错。
-
-### 添加第三方软件源
-
-编辑 `custom-feeds.conf`，格式：
-
-```
-src-git <源名称> <Git仓库地址>
-```
-
-例如添加一个新源：
-```
-src-git example https://github.com/example/openwrt-packages
-```
-
-### 修改固件默认 LAN IP / 密码 / 主题
-
-编辑 `files/etc/uci-defaults/zzz-custom-settings`，修改其中的 `uci set` 命令参数即可。
-
-### 添加本地额外插件
-
-把插件目录放到 `custom-packages/` 下，然后在 `scripts/extra.sh` 里去掉相关注释，脚本会自动把它们复制进 OpenWrt 源码的 `package/` 目录。
-
-## 注意事项
-
-- **ubuntu-22.04 runner 将于 2026-09-17 弃用**，届时将 `build-openwrt.yml` 中 `runs-on: ubuntu-22.04` 改为 `runs-on: ubuntu-24.04` 即可
-- 编译过程不使用 SSH 登录，全程在 GitHub 虚拟机上完成
-- 不加任何代理插件（OpenClash、PassWall 等）
-- 如果 EasyTier 预编译二进制下载失败，可以在 config 里注释掉 `CONFIG_PACKAGE_easytier=y` 和 `CONFIG_PACKAGE_luci-app-easytier=y`
-
-## 参考资源
-
-- [lede 源码仓库](https://github.com/coolsnowwolf/lede)
-- [kenzok8 第三方源](https://github.com/kenzok8/openwrt-packages)
-- [OpenAppFilter](https://github.com/destan19/OpenAppFilter)
-- [EasyTier luci-app](https://github.com/EasyTier/luci-app-easytier)
-- [TurboAcc](https://github.com/chenmozhijin/turboacc)
+- 本固件**不包含任何代理插件**（helloworld / SSR-Plus / Passwall 等 feed 已在编译前移除）；
+- 编译流程**不接入 SSH/tmate 调试**，全自动完成；
+- 仅适用于 X86/64 架构（64 位软路由、迷你主机、虚拟机）；
+- 虚拟机使用时：请自行用 IMG 转换，或直接把 IMG 挂载为虚拟磁盘（本仓库不产出 VMDK/VHDX）。

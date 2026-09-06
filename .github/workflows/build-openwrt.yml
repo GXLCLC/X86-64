@@ -144,7 +144,6 @@ jobs:
       - name: 添加第三方软件源
         run: |
           cd openwrt
-
           if [ -f "$GITHUB_WORKSPACE/$CUSTOM_FEEDS" ]; then
               # 关键：Windows 上 clone 下来的文件是 CRLF 换行符，Linux 下会让 Perl feeds 脚本报
               # "Syntax error in feeds.conf.default"！必须先把 \r\n 转成 \n。
@@ -162,6 +161,7 @@ jobs:
           echo ""
           echo "--- feeds 源列表（只看 src- 行）---"
           grep -E '^src-' feeds.conf.default
+
       # ============ 第 7 步：下载独立插件源码 ============
       # 原因：有些插件不是标准 feeds 仓库，而是单个 package 目录发布的，
       #       直接克隆到 openwrt/package/ 下即可参与编译。
@@ -250,12 +250,51 @@ jobs:
       # 原因：x86_64.config 里只写了我们关心的少数选项，
       #       make defconfig 会自动补全所有依赖项（比如选了 luci-app-mwan3 会自动
       #       选中它依赖的 luci、mwan3 等），生成一份完整可用的 .config
-      # 注意：defconfig 会静默丢弃"不认识的配置行"（包名写错/源里没有该包/依赖
-      #       不满足都会被直接删掉），所以下一步必须校验，防止静默出错固件
       - name: 生成完整编译配置
         run: |
           cd openwrt
           make defconfig
+
+      # ============ 第 12.5 步：强制统一 SSL 后端 + 清理冲突包 ============
+      # 根因：OpenWrt/lede 有三种 SSL 后端（openssl、mbedtls、wolfssl），
+      #       它们互相冲突——都提供同名文件 libustream-ssl.so。
+      #       我们只选了 luci-ssl，理论上 defconfig 应该选一种默认后端。
+      #       但某个插件/依赖链硬拉了另一种后端，导致双后端并存 →
+      #       package/install 阶段必炸（报错"文件已被另一个包提供"）。
+      #       手写 "is not set" 没用——defconfig 会根据依赖自动拉回来！
+      # 解决方案：用 OpenWrt 官方 scripts/config 工具（比手写 CONFIG 行权威得多），
+      #       先强制关掉 openssl/wolfssl、强制选 mbedtls（lede 默认），
+      #       再跑一次 make defconfig。这次 defconfig 会发现那些"硬依赖 openssl"
+      #       的包无法满足，自动把它们从 .config 里清理掉——最干净的解法！
+      - name: 强制统一 SSL 后端 + 清理冲突包
+        run: |
+          cd openwrt
+          echo "--- 修复前：libustream 后端状态 ---"
+          grep '^CONFIG_PACKAGE_libustream-' .config || echo "（没有任何 libustream 后端，正常）"
+          echo ""
+          echo "--- 用 scripts/config 强制关掉 openssl/wolfssl，只留 mbedtls ---"
+          # scripts/config 是 OpenWrt 自带的 .config 编辑器，直接修改选项值，
+          # 跟 menuconfig 里手动勾/取消效果完全一样
+          scripts/config --disable PACKAGE_libustream-openssl
+          scripts/config --disable PACKAGE_libustream-wolfssl
+          scripts/config --enable PACKAGE_libustream-mbedtls
+          # 用 scripts/config 强制关掉所有硬依赖 openssl 的包（防止它们被间接拉进来）
+          scripts/config --disable PACKAGE_libopenssl
+          scripts/config --disable PACKAGE_libopenssl-conf
+          # 重新跑 defconfig，这次它会把"依赖 openssl 的包"自动清理掉
+          make defconfig
+          echo ""
+          echo "--- 修复后：libustream 后端状态 ---"
+          grep '^CONFIG_PACKAGE_libustream-' .config
+          echo ""
+          echo "--- 额外检查：还有没有 libopenssl 被选上 ---"
+          if grep -q '^CONFIG_PACKAGE_libopenssl=y' .config; then
+              echo "⚠️  libopenssl 仍然被选上，检查一下谁依赖它："
+              # 列出所有依赖 libopenssl 的包，帮助定位
+              grep -B5 -A5 'libopenssl' .config | head -20 || true
+          else
+              echo "✅ libopenssl 已被清理，干净"
+          fi
 
       # ============ 第 13 步：上传最终配置文件（调试用）========
       # 目的：把 defconfig 生成的完整 .config 存为构建产物。
